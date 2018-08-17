@@ -27,7 +27,7 @@ namespace Renci.SshNet
     public class Session : ISession
     {
         private const byte Null = 0x00;
-        private const byte CarriageReturn = 0x0d;
+        internal const byte CarriageReturn = 0x0d;
         internal const byte LineFeed = 0x0a;
 
         /// <summary>
@@ -45,14 +45,6 @@ namespace Renci.SshNet
         /// The value of this field is <c>-1</c>.
         /// </remarks>
         internal static readonly int Infinite = -1;
-
-        /// <summary>
-        /// Specifies maximum packet size defined by the protocol.
-        /// </summary>
-        /// <value>
-        /// 68536 (64 KB + 3000 bytes).
-        /// </value>
-        private const int MaximumSshPacketSize = LocalChannelDataPacketSize + 3000;
 
         /// <summary>
         /// Holds the initial local window size for the channels.
@@ -82,10 +74,18 @@ namespace Renci.SshNet
         /// </remarks>
         private const int LocalChannelDataPacketSize = 1024*64;
 
+        /// <summary>
+        /// Specifies maximum packet size defined by the protocol.
+        /// </summary>
+        /// <value>
+        /// 68536 (64 KB + 3000 bytes).
+        /// </value>
+        internal const int MaximumSshPacketSize = LocalChannelDataPacketSize + 3000;
+
 #if FEATURE_REGEX_COMPILE
-        private static readonly Regex ServerVersionRe = new Regex("^SSH-(?<protoversion>[^-]+)-(?<softwareversion>.+)( SP.+)?$", RegexOptions.Compiled);
+        internal static readonly Regex ServerVersionRe = new Regex("^SSH-(?<protoversion>[^-]+)-(?<softwareversion>.+)( SP.+)?$", RegexOptions.Compiled);
 #else
-        private static readonly Regex ServerVersionRe = new Regex("^SSH-(?<protoversion>[^-]+)-(?<softwareversion>.+)( SP.+)?$");
+        internal static readonly Regex ServerVersionRe = new Regex("^SSH-(?<protoversion>[^-]+)-(?<softwareversion>.+)( SP.+)?$");
 #endif
 
         /// <summary>
@@ -105,16 +105,6 @@ namespace Renci.SshNet
         /// Holds a <see cref="WaitHandle"/> that is signaled when the message listener loop has completed.
         /// </summary>
         private EventWaitHandle _messageListenerCompleted;
-
-        /// <summary>
-        /// Specifies outbound packet number
-        /// </summary>
-        private volatile uint _outboundPacketSequence;
-
-        /// <summary>
-        /// Specifies incoming packet number
-        /// </summary>
-        private uint _inboundPacketSequence;
 
         /// <summary>
         /// WaitHandle to signal that last service request was accepted
@@ -153,17 +143,17 @@ namespace Renci.SshNet
 
         private IKeyExchange _keyExchange;
 
-        private HashAlgorithm _serverMac;
+        internal HashAlgorithm ServerMac { get; private set; }
 
-        private HashAlgorithm _clientMac;
+        internal HashAlgorithm ClientMac { get; private set; }
 
-        private Cipher _clientCipher;
+        internal Cipher ClientCipher { get; private set; }
 
-        private Cipher _serverCipher;
+        internal Cipher ServerCipher { get; private set; }
 
-        private Compressor _serverDecompression;
+        internal Compressor ServerDecompression { get; private set; }
 
-        private Compressor _clientCompression;
+        internal Compressor ClientCompression { get; private set; }
 
         private SemaphoreLight _sessionSemaphore;
 
@@ -177,33 +167,7 @@ namespace Renci.SshNet
         /// </summary>
         private Socket _socket;
 
-#if FEATURE_SOCKET_POLL
-        /// <summary>
-        /// Holds an object that is used to ensure only a single thread can read from
-        /// <see cref="_socket"/> at any given time.
-        /// </summary>
-        private readonly object _socketReadLock = new object();
-#endif // FEATURE_SOCKET_POLL
-
-        /// <summary>
-        /// Holds an object that is used to ensure only a single thread can write to
-        /// <see cref="_socket"/> at any given time.
-        /// </summary>
-        /// <remarks>
-        /// This is also used to ensure that <see cref="_outboundPacketSequence"/> is
-        /// incremented atomatically.
-        /// </remarks>
-        private readonly object _socketWriteLock = new object();
-
-        /// <summary>
-        /// Holds an object that is used to ensure only a single thread can dispose
-        /// <see cref="_socket"/> at any given time.
-        /// </summary>
-        /// <remarks>
-        /// This is also used to ensure that <see cref="_socket"/> will not be disposed
-        /// while performing a given operation or set of operations on <see cref="_socket"/>.
-        /// </remarks>
-        private readonly object _socketDisposeLock = new object();
+        private AsyncMessageListener _messageListener;
 
         /// <summary>
         /// Gets the session semaphore that controls session channels.
@@ -290,7 +254,7 @@ namespace Renci.SshNet
                 if (_messageListenerCompleted == null || _messageListenerCompleted.WaitOne(0))
                     return false;
 
-                return IsSocketConnected();
+                return _messageListener != null && _messageListener.IsConnected;
             }
         }
 
@@ -338,7 +302,10 @@ namespace Renci.SshNet
         /// Gets or sets the server version string.
         /// </summary>
         /// <value>The server version.</value>
-        public string ServerVersion { get; private set; }
+        public string ServerVersion
+        {
+            get { return ConnectionInfo.ServerVersion; }
+        }
 
         /// <summary>
         /// Gets or sets the client version string.
@@ -601,58 +568,77 @@ namespace Renci.SshNet
                             break;
                     }
 
-                    Match versionMatch;
-
-                    //  Get server version from the server,
-                    //  ignore text lines which are sent before if any
-                    while (true)
-                    {
-                        var serverVersion = SocketReadLine(ConnectionInfo.Timeout);
-                        if (serverVersion == null)
-                            throw new SshConnectionException("Server response does not contain SSH protocol identification.", DisconnectReason.ProtocolError);
-                        versionMatch = ServerVersionRe.Match(serverVersion);
-                        if (versionMatch.Success)
-                        {
-                            ServerVersion = serverVersion;
-                            break;
-                        }
-                    }
-
-                    //  Set connection versions
-                    ConnectionInfo.ServerVersion = ServerVersion;
-                    ConnectionInfo.ClientVersion = ClientVersion;
-
-                    //  Get server SSH version
-                    var version = versionMatch.Result("${protoversion}");
-
-                    var softwareName = versionMatch.Result("${softwareversion}");
-
-                    DiagnosticAbstraction.Log(string.Format("Server version '{0}' on '{1}'.", version, softwareName));
-
-                    if (!(version.Equals("2.0") || version.Equals("1.99")))
-                    {
-                        throw new SshConnectionException(string.Format(CultureInfo.CurrentCulture, "Server version '{0}' is not supported.", version), DisconnectReason.ProtocolVersionNotSupported);
-                    }
-
-                    SocketAbstraction.Send(_socket, Encoding.UTF8.GetBytes(string.Format(CultureInfo.InvariantCulture, "{0}\x0D\x0A", ClientVersion)));
-
-                    //  Register Transport response messages
-                    RegisterMessage("SSH_MSG_DISCONNECT");
-                    RegisterMessage("SSH_MSG_IGNORE");
-                    RegisterMessage("SSH_MSG_UNIMPLEMENTED");
-                    RegisterMessage("SSH_MSG_DEBUG");
-                    RegisterMessage("SSH_MSG_SERVICE_ACCEPT");
-                    RegisterMessage("SSH_MSG_KEXINIT");
-                    RegisterMessage("SSH_MSG_NEWKEYS");
-
-                    //  Some server implementations might sent this message first, prior establishing encryption algorithm
-                    RegisterMessage("SSH_MSG_USERAUTH_BANNER");
+                    // TODO: only mark as started when we now for sure the listener is started
 
                     // mark the message listener threads as started
                     _messageListenerCompleted.Reset();
 
-                    //  Start incoming request listener
-                    ThreadAbstraction.ExecuteThread(MessageListener);
+                    _messageListener = new AsyncMessageListener(this, _socket, LoadMessage);
+                    _messageListener.Start();
+                    _messageListener.Closed += (sender, args) =>  _messageListenerCompleted.Set();
+                    _messageListener.Error += (sender, args) =>
+                        {
+                            _messageListenerCompleted.Set();
+
+                            DiagnosticAbstraction.Log(string.Format("[{0}] Raised exception: {1}", ToHex(SessionId), args.Exception));
+
+                            var connectionException = args.Exception as SshConnectionException;
+
+                            if (_isDisconnecting)
+                            {
+                                //  a connection exception which is raised while isDisconnecting is normal and
+                                //  should be ignored
+                                if (connectionException != null)
+                                    return;
+
+                                // any timeout while disconnecting can be caused by loss of connectivity
+                                // altogether and should be ignored
+                                var socketException = args.Exception as SocketException;
+                                if (socketException != null && socketException.SocketErrorCode == SocketError.TimedOut)
+                                    return;
+                            }
+
+                            // "save" exception and set exception wait handle to ensure any waits are interrupted
+                            _exception = args.Exception;
+                            _exceptionWaitHandle.Set();
+
+                            var errorOccured = ErrorOccured;
+                            if (errorOccured != null)
+                                errorOccured(this, new ExceptionEventArgs(args.Exception));
+
+                            if (connectionException != null)
+                            {
+                                DiagnosticAbstraction.Log(string.Format("[{0}] Disconnecting after exception: {1}", ToHex(SessionId), args.Exception));
+                                Disconnect(connectionException.DisconnectReason, args.Exception.ToString());
+                            }
+                        };
+                    _messageListener.ServerIdentified += (sender, args) =>
+                        {
+                            ConnectionInfo.ServerVersion = args.ServerIdentification;
+
+                            DiagnosticAbstraction.Log(string.Format("Server version '{0}' on '{1}'.", args.ProtocolVersion, args.SoftwareName));
+
+                            if (args.ProtocolVersion != "2.0" && args.ProtocolVersion != "1.99")
+                            {
+                                _exception = new SshConnectionException(string.Format(CultureInfo.CurrentCulture, "Server version '{0}' is not supported.", args.ProtocolVersion), DisconnectReason.ProtocolVersionNotSupported);
+                                _exceptionWaitHandle.Set();
+                                return;
+                            }
+
+                            // Register Transport response messages
+                            RegisterMessage("SSH_MSG_DISCONNECT");
+                            RegisterMessage("SSH_MSG_IGNORE");
+                            RegisterMessage("SSH_MSG_UNIMPLEMENTED");
+                            RegisterMessage("SSH_MSG_DEBUG");
+                            RegisterMessage("SSH_MSG_SERVICE_ACCEPT");
+                            RegisterMessage("SSH_MSG_KEXINIT");
+                            RegisterMessage("SSH_MSG_NEWKEYS");
+
+                            //  Some server implementations might sent this message first, prior establishing encryption algorithm
+                            RegisterMessage("SSH_MSG_USERAUTH_BANNER");
+
+                            _messageListener.SendClientIdentification(ClientVersion);
+                        };
 
                     //  Wait for key exchange to be completed
                     WaitOnHandle(_keyExchangeCompletedWaitHandle);
@@ -740,10 +726,19 @@ namespace Renci.SshNet
             if (IsConnected)
             {
                 TrySendDisconnect(reason, message);
+
+                if (_messageListenerCompleted.WaitOne(300))
+                {
+                    return;
+                }
             }
 
             // disconnect socket, and dispose it
-            SocketDisconnectAndDispose();
+            if (_messageListener != null)
+            {
+                Console.WriteLine("DISPOSE");
+                _messageListener.Dispose();
+            }
         }
 
         /// <summary>
@@ -934,87 +929,7 @@ namespace Renci.SshNet
                 WaitOnHandle(_keyExchangeCompletedWaitHandle);
             }
 
-            DiagnosticAbstraction.Log(string.Format("[{0}] Sending message '{1}' to server: '{2}'.", ToHex(SessionId), message.GetType().Name, message));
-
-            var paddingMultiplier = _clientCipher == null ? (byte) 8 : Math.Max((byte) 8, _serverCipher.MinimumSize);
-            var packetData = message.GetPacket(paddingMultiplier, _clientCompression);
-
-            // take a write lock to ensure the outbound packet sequence number is incremented
-            // atomically, and only after the packet has actually been sent
-            lock (_socketWriteLock)
-            {
-                byte[] hash = null;
-                var packetDataOffset = 4; // first four bytes are reserved for outbound packet sequence
-
-                if (_clientMac != null)
-                {
-                    // write outbound packet sequence to start of packet data
-                    Pack.UInt32ToBigEndian(_outboundPacketSequence, packetData);
-                    //  calculate packet hash
-                    hash = _clientMac.ComputeHash(packetData);
-                }
-
-                // Encrypt packet data
-                if (_clientCipher != null)
-                {
-                    packetData = _clientCipher.Encrypt(packetData, packetDataOffset, (packetData.Length - packetDataOffset));
-                    packetDataOffset = 0;
-                }
-
-                if (packetData.Length > MaximumSshPacketSize)
-                {
-                    throw new InvalidOperationException(string.Format(CultureInfo.CurrentCulture, "Packet is too big. Maximum packet size is {0} bytes.", MaximumSshPacketSize));
-                }
-
-                var packetLength = packetData.Length - packetDataOffset;
-                if (hash == null)
-                {
-                    SendPacket(packetData, packetDataOffset, packetLength);
-                }
-                else
-                {
-                    var data = new byte[packetLength + hash.Length];
-                    Buffer.BlockCopy(packetData, packetDataOffset, data, 0, packetLength);
-                    Buffer.BlockCopy(hash, 0, data, packetLength, hash.Length);
-                    SendPacket(data, 0, data.Length);
-                }
-
-                // increment the packet sequence number only after we're sure the packet has
-                // been sent; even though it's only used for the MAC, it needs to be incremented
-                // for each package sent.
-                // 
-                // the server will use it to verify the data integrity, and as such the order in
-                // which messages are sent must follow the outbound packet sequence number
-                _outboundPacketSequence++;
-            }
-        }
-
-        /// <summary>
-        /// Sends an SSH packet to the server.
-        /// </summary>
-        /// <param name="packet">A byte array containing the packet to send.</param>
-        /// <param name="offset">The offset of the packet.</param>
-        /// <param name="length">The length of the packet.</param>
-        /// <exception cref="SshConnectionException">Client is not connected to the server.</exception>
-        /// <remarks>
-        /// <para>
-        /// The send is performed in a dispose lock to avoid <see cref="NullReferenceException"/>
-        /// and/or <see cref="ObjectDisposedException"/> when sending the packet.
-        /// </para>
-        /// <para>
-        /// This method is only to be used when the connection is established, as the locking
-        /// overhead is not required while establising the connection.
-        /// </para>
-        /// </remarks>
-        private void SendPacket(byte[] packet, int offset, int length)
-        {
-            lock (_socketDisposeLock)
-            {
-                if (!_socket.IsConnected())
-                    throw new SshConnectionException("Client not connected.");
-
-                SocketAbstraction.Send(_socket, packet, offset, length);
-            }
+            _messageListener.SendMessage(message);
         }
 
         /// <summary>
@@ -1046,133 +961,6 @@ namespace Renci.SshNet
                 DiagnosticAbstraction.Log(string.Format("Failure sending message '{0}' to server: '{1}' => {2}", message.GetType().Name, message, ex));
                 return false;
             }
-        }
-
-        /// <summary>
-        /// Receives the message from the server.
-        /// </summary>
-        /// <returns>
-        /// The incoming SSH message, or <c>null</c> if the connection with the SSH server was closed.
-        /// </returns>
-        /// <remarks>
-        /// We need no locking here since all messages are read by a single thread.
-        /// </remarks>
-        private Message ReceiveMessage()
-        {
-            // the length of the packet sequence field in bytes
-            const int inboundPacketSequenceLength = 4;
-            // The length of the "packet length" field in bytes
-            const int packetLengthFieldLength = 4;
-            // The length of the "padding length" field in bytes
-            const int paddingLengthFieldLength = 1;
-
-            // Determine the size of the first block, which is 8 or cipher block size (whichever is larger) bytes
-            var blockSize = _serverCipher == null ? (byte) 8 : Math.Max((byte) 8, _serverCipher.MinimumSize);
-
-            var serverMacLength = _serverMac != null ? _serverMac.HashSize/8 : 0;
-
-            byte[] data;
-            uint packetLength;
-
-#if FEATURE_SOCKET_POLL
-            // avoid reading from socket while IsSocketConnected is attempting to determine whether the
-            // socket is still connected by invoking Socket.Poll(...) and subsequently verifying value of
-            // Socket.Available
-            lock (_socketReadLock)
-            {
-#endif // FEATURE_SOCKET_POLL
-                //  Read first block - which starts with the packet length
-                var firstBlock = new byte[blockSize];
-                if (TrySocketRead(firstBlock, 0, blockSize) == 0)
-                {
-                    // connection with SSH server was closed
-                    return null;
-                }
-
-                if (_serverCipher != null)
-                {
-                    firstBlock = _serverCipher.Decrypt(firstBlock);
-                }
-
-                packetLength = Pack.BigEndianToUInt32(firstBlock);
-
-                // Test packet minimum and maximum boundaries
-                if (packetLength < Math.Max((byte) 16, blockSize) - 4 || packetLength > MaximumSshPacketSize - 4)
-                    throw new SshConnectionException(
-                        string.Format(CultureInfo.CurrentCulture, "Bad packet length: {0}.", packetLength),
-                        DisconnectReason.ProtocolError);
-
-                // Determine the number of bytes left to read; We've already read "blockSize" bytes, but the
-                // "packet length" field itself - which is 4 bytes - is not included in the length of the packet
-                var bytesToRead = (int) (packetLength - (blockSize - packetLengthFieldLength)) + serverMacLength;
-
-                // Construct buffer for holding the payload and the inbound packet sequence as we need both in order
-                // to generate the hash.
-                // 
-                // The total length of the "data" buffer is an addition of:
-                // - inboundPacketSequenceLength (4 bytes)
-                // - packetLength
-                // - serverMacLength
-                // 
-                // We include the inbound packet sequence to allow us to have the the full SSH packet in a single
-                // byte[] for the purpose of calculating the client hash. Room for the server MAC is foreseen
-                // to read the packet including server MAC in a single pass (except for the initial block).
-                data = new byte[bytesToRead + blockSize + inboundPacketSequenceLength];
-                Pack.UInt32ToBigEndian(_inboundPacketSequence, data);
-                Buffer.BlockCopy(firstBlock, 0, data, inboundPacketSequenceLength, firstBlock.Length);
-
-                if (bytesToRead > 0)
-                {
-                    if (TrySocketRead(data, blockSize + inboundPacketSequenceLength, bytesToRead) == 0)
-                    {
-                        return null;
-                    }
-                }
-#if FEATURE_SOCKET_POLL
-            }
-#endif // FEATURE_SOCKET_POLL
-
-            if (_serverCipher != null)
-            {
-                var numberOfBytesToDecrypt = data.Length - (blockSize + inboundPacketSequenceLength + serverMacLength);
-                if (numberOfBytesToDecrypt > 0)
-                {
-                    var decryptedData = _serverCipher.Decrypt(data, blockSize + inboundPacketSequenceLength, numberOfBytesToDecrypt);
-                    Buffer.BlockCopy(decryptedData, 0, data, blockSize + inboundPacketSequenceLength, decryptedData.Length);
-                }
-            }
-
-            var paddingLength = data[inboundPacketSequenceLength + packetLengthFieldLength];
-            var messagePayloadLength = (int) packetLength - paddingLength - paddingLengthFieldLength;
-            var messagePayloadOffset = inboundPacketSequenceLength + packetLengthFieldLength + paddingLengthFieldLength;
-
-            // validate message against MAC
-            if (_serverMac != null)
-            {
-                var clientHash = _serverMac.ComputeHash(data, 0, data.Length - serverMacLength);
-                var serverHash = data.Take(data.Length - serverMacLength, serverMacLength);
-
-                // TODO add IsEqualTo overload that takes left+right index and number of bytes to compare;
-                // TODO that way we can eliminate the extra allocation of the Take above
-                if (!serverHash.IsEqualTo(clientHash))
-                {
-                    throw new SshConnectionException("MAC error", DisconnectReason.MacError);
-                }
-            }
-
-            if (_serverDecompression != null)
-            {
-                data = _serverDecompression.Decompress(data, messagePayloadOffset, messagePayloadLength);
-
-                // data now only contains the decompressed payload, and as such the offset is reset to zero
-                messagePayloadOffset = 0;
-                // the length of the payload is now the complete decompressed content
-                messagePayloadLength = data.Length;
-            }
-
-            _inboundPacketSequence++;
-
-            return LoadMessage(data, messagePayloadOffset, messagePayloadLength);
         }
 
         private void TrySendDisconnect(DisconnectReason reasonCode, string message)
@@ -1213,7 +1001,7 @@ namespace Renci.SshNet
                 disconnected(this, new EventArgs());
 
             // disconnect socket, and dispose it
-            SocketDisconnectAndDispose();
+            _messageListener.Dispose();
         }
 
         /// <summary>
@@ -1335,25 +1123,26 @@ namespace Renci.SshNet
             }
 
             //  Dispose of old ciphers and hash algorithms
-            if (_serverMac != null)
+            if (ServerMac != null)
             {
-                _serverMac.Dispose();
-                _serverMac = null;
+                ServerMac.Dispose();
+                ServerMac = null;
             }
 
-            if (_clientMac != null)
+            if (ClientMac != null)
             {
-                _clientMac.Dispose();
-                _clientMac = null;
+                ClientMac.Dispose();
+                ClientMac = null;
             }
 
             //  Update negotiated algorithms
-            _serverCipher = _keyExchange.CreateServerCipher();
-            _clientCipher = _keyExchange.CreateClientCipher();
-            _serverMac = _keyExchange.CreateServerHash();
-            _clientMac = _keyExchange.CreateClientHash();
-            _clientCompression = _keyExchange.CreateCompressor();
-            _serverDecompression = _keyExchange.CreateDecompressor();
+            ServerCipher = _keyExchange.CreateServerCipher();
+            ServerMac = _keyExchange.CreateServerHash();
+            ServerDecompression = _keyExchange.CreateDecompressor();
+
+            ClientCipher = _keyExchange.CreateClientCipher();
+            ClientMac = _keyExchange.CreateClientHash();
+            ClientCompression = _keyExchange.CreateCompressor();
 
             //  Dispose of old KeyExchange object as it is no longer needed.
             if (_keyExchange != null)
@@ -1651,35 +1440,22 @@ namespace Renci.SshNet
         {
             var messageType = data[offset];
 
+
             var message = _sshMessageFactory.Create(messageType);
+
+            // TODO REMOVE
+            if (messageType == 20)
+            {
+                DiagnosticAbstraction.Log(string.Format("[{0}] {1} (Offset={2}; Count={3}).", ToHex(SessionId), message.GetType().Name, offset, count));
+                DiagnosticAbstraction.Log(data.AsString());
+            }
+
             message.Load(data, offset + 1, count - 1);
+
 
             DiagnosticAbstraction.Log(string.Format("[{0}] Received message '{1}' from server: '{2}'.", ToHex(SessionId), message.GetType().Name, message));
 
             return message;
-        }
-
-        private static string ToHex(byte[] bytes, int offset)
-        {
-            var byteCount = bytes.Length - offset;
-
-            var builder = new StringBuilder(bytes.Length * 2);
-
-            for (var i = offset; i < byteCount; i++)
-            {
-                var b = bytes[i];
-                builder.Append(b.ToString("X2"));
-            }
-
-            return builder.ToString();
-        }
-
-        internal static string ToHex(byte[] bytes)
-        {
-            if (bytes == null)
-                return null;
-
-            return ToHex(bytes, 0);
         }
 
         #endregion
@@ -1731,95 +1507,6 @@ namespace Renci.SshNet
             return bytesRead;
         }
 
-#if FEATURE_SOCKET_POLL
-        /// <summary>
-        /// Gets a value indicating whether the socket is connected.
-        /// </summary>
-        /// <returns>
-        /// <c>true</c> if the socket is connected; otherwise, <c>false</c>.
-        /// </returns>
-        /// <remarks>
-        /// <para>
-        /// As a first check we verify whether <see cref="Socket.Connected"/> is
-        /// <c>true</c>. However, this only returns the state of the socket as of
-        /// the last I/O operation.
-        /// </para>
-        /// <para>
-        /// Therefore we use the combination of <see cref="Socket.Poll(int, SelectMode)"/> with mode <see cref="SelectMode.SelectRead"/>
-        /// and <see cref="Socket.Available"/> to verify if the socket is still connected.
-        /// </para>
-        /// <para>
-        /// The MSDN doc mention the following on the return value of <see cref="Socket.Poll(int, SelectMode)"/>
-        /// with mode <see cref="SelectMode.SelectRead"/>:
-        /// <list type="bullet">
-        ///     <item>
-        ///         <description><c>true</c> if data is available for reading;</description>
-        ///     </item>
-        ///     <item>
-        ///         <description><c>true</c> if the connection has been closed, reset, or terminated; otherwise, returns <c>false</c>.</description>
-        ///     </item>
-        /// </list>
-        /// </para>
-        /// <para>
-        /// <c>Conclusion:</c> when the return value is <c>true</c> - but no data is available for reading - then
-        /// the socket is no longer connected.
-        /// </para>
-        /// <para>
-        /// When a <see cref="Socket"/> is used from multiple threads, there's a race condition
-        /// between the invocation of <see cref="Socket.Poll(int, SelectMode)"/> and the moment
-        /// when the value of <see cref="Socket.Available"/> is obtained. To workaround this issue
-        /// we synchronize reads from the <see cref="Socket"/>.
-        /// </para>
-        /// </remarks>
-#else
-/// <summary>
-/// Gets a value indicating whether the socket is connected.
-/// </summary>
-/// <returns>
-/// <c>true</c> if the socket is connected; otherwise, <c>false</c>.
-/// </returns>
-/// <remarks>
-/// We verify whether <see cref="Socket.Connected"/> is <c>true</c>. However, this only returns the state
-/// of the socket as of the last I/O operation.
-/// </remarks>
-#endif
-        private bool IsSocketConnected()
-        {
-            lock (_socketDisposeLock)
-            {
-#if FEATURE_SOCKET_POLL
-                if (!_socket.IsConnected())
-                {
-                    return false;
-                }
-
-                lock (_socketReadLock)
-                {
-                    var connectionClosedOrDataAvailable = _socket.Poll(0, SelectMode.SelectRead);
-                    return !(connectionClosedOrDataAvailable && _socket.Available == 0);
-                }
-#else
-                return _socket.IsConnected();
-#endif // FEATURE_SOCKET_POLL
-            }
-        }
-
-        /// <summary>
-        /// Performs a blocking read on the socket until <paramref name="length"/> bytes are received.
-        /// </summary>
-        /// <param name="buffer">An array of type <see cref="byte"/> that is the storage location for the received data.</param>
-        /// <param name="offset">The position in <paramref name="buffer"/> parameter to store the received data.</param>
-        /// <param name="length">The number of bytes to read.</param>
-        /// <returns>
-        /// The number of bytes read.
-        /// </returns>
-        /// <exception cref="SshOperationTimeoutException">The read has timed-out.</exception>
-        /// <exception cref="SocketException">The read failed.</exception>
-        private int TrySocketRead(byte[] buffer, int offset, int length)
-        {
-            return SocketAbstraction.Read(_socket, buffer, offset, length, InfiniteTimeSpan);
-        }
-
         /// <summary>
         /// Performs a blocking read on the socket until a line is read.
         /// </summary>
@@ -1860,139 +1547,6 @@ namespace Renci.SshNet
                 // strip trailing LF
                 return encoding.GetString(buffer.ToArray(), 0, buffer.Count - 1);
             return encoding.GetString(buffer.ToArray(), 0, buffer.Count);
-        }
-
-        /// <summary>
-        /// Shuts down and disposes the socket.
-        /// </summary>
-        private void SocketDisconnectAndDispose()
-        {
-            if (_socket != null)
-            {
-                lock (_socketDisposeLock)
-                {
-                    if (_socket != null)
-                    {
-                        if (_socket.Connected)
-                        {
-                            try
-                            {
-                                DiagnosticAbstraction.Log(string.Format("[{0}] Shutting down socket.", ToHex(SessionId)));
-
-                                // interrupt any pending reads; should be done outside of socket read lock as we
-                                // actually want shutdown the socket to make sure blocking reads are interrupted
-                                //
-                                // this may result in a SocketException (eg. An existing connection was forcibly
-                                // closed by the remote host) which we'll log and ignore as it means the socket
-                                // was already shut down
-                                _socket.Shutdown(SocketShutdown.Send);
-                            }
-                            catch (SocketException ex)
-                            {
-                                // TODO: log as warning
-                                DiagnosticAbstraction.Log("Failure shutting down socket: " + ex);
-                            }
-                        }
-
-                        DiagnosticAbstraction.Log(string.Format("[{0}] Disposing socket.", ToHex(SessionId)));
-                        _socket.Dispose();
-                        DiagnosticAbstraction.Log(string.Format("[{0}] Disposed socket.", ToHex(SessionId)));
-                        _socket = null;
-                    }
-                }
-            }
-        }
-
-        /// <summary>
-        /// Listens for incoming message from the server and handles them. This method run as a task on separate thread.
-        /// </summary>
-        private void MessageListener()
-        {
-#if FEATURE_SOCKET_SELECT
-            var readSockets = new List<Socket> { _socket };
-#endif // FEATURE_SOCKET_SELECT
-
-            try
-            {
-                // remain in message loop until socket is shut down or until we're disconnecting
-                while (_socket.IsConnected())
-                {
-#if FEATURE_SOCKET_SELECT
-                    // if the socket is already disposed when Select is invoked, then a SocketException
-                    // stating "An operation was attempted on something that is not a socket" is thrown;
-                    // we attempt to avoid this exception by having an IsConnected() that can break the
-                    // message loop
-                    //
-                    // note that there's no guarantee that the socket will not be disposed between the
-                    // IsConnected() check and the Select invocation; we can't take a "dispose" lock
-                    // that includes the Select invocation as we want Dispose() to be able to interrupt
-                    // the Select
-
-                    // perform a blocking select to determine whether there's is data available to be
-                    // read; we do not use a blocking read to allow us to use Socket.Poll to determine
-                    // if the connection is still available (in IsSocketConnected)
-
-                    Socket.Select(readSockets, null, null, -1);
-
-                    // the Select invocation will be interrupted in one of the following conditions:
-                    // * data is available to be read
-                    //   => the socket will not be removed from "readSockets"
-                    // * the socket connection is closed during the Select invocation
-                    //   => the socket will be removed from "readSockets"
-                    // * the socket is disposed during the Select invocation
-                    //   => the socket will not be removed from "readSocket"
-                    // 
-                    // since we handle the second and third condition the same way and Socket.Connected
-                    // allows us to check for both conditions, we use that instead of both checking for
-                    // the removal from "readSockets" and the Connection check
-                    if (!_socket.IsConnected())
-                    {
-                        // connection with SSH server was closed or socket was disposed;
-                        // break out of the message loop
-                        break;
-                    }
-#elif FEATURE_SOCKET_POLL
-                    // when Socket.Select(IList, IList, IList, Int32) is not available or is buggy, we use
-                    // Socket.Poll(Int, SelectMode) to block until either data is available or the socket
-                    // is closed
-                    _socket.Poll(-1, SelectMode.SelectRead);
-
-                    if (!_socket.IsConnected())
-                    {
-                        // connection with SSH server was closed or socket was disposed;
-                        // break out of the message loop
-                        break;
-                    }
-#endif // FEATURE_SOCKET_SELECT
-
-                    var message = ReceiveMessage();
-                    if (message == null)
-                    {
-                        // connection with SSH server was closed;
-                        // break out of the message loop
-                        break;
-                    }
-
-                    // process message
-                    message.Process(this);
-                }
-
-                // connection with SSH server was closed or socket was disposed
-                RaiseError(CreateConnectionAbortedByServerException());
-            }
-            catch (SocketException ex)
-            {
-                RaiseError(new SshConnectionException(ex.Message, DisconnectReason.ConnectionLost, ex));
-            }
-            catch (Exception exp)
-            {
-                RaiseError(exp);
-            }
-            finally
-            {
-                // signal that the message listener thread has stopped
-                _messageListenerCompleted.Set();
-            }
         }
 
         private byte SocketReadByte()
@@ -2382,45 +1936,6 @@ namespace Renci.SshNet
         }
 
         /// <summary>
-        /// Raises the <see cref="ErrorOccured"/> event.
-        /// </summary>
-        /// <param name="exp">The <see cref="Exception"/>.</param>
-        private void RaiseError(Exception exp)
-        {
-            var connectionException = exp as SshConnectionException;
-
-            DiagnosticAbstraction.Log(string.Format("[{0}] Raised exception: {1}", ToHex(SessionId), exp));
-
-            if (_isDisconnecting)
-            {
-                //  a connection exception which is raised while isDisconnecting is normal and
-                //  should be ignored
-                if (connectionException != null)
-                    return;
-
-                // any timeout while disconnecting can be caused by loss of connectivity
-                // altogether and should be ignored
-                var socketException = exp as SocketException;
-                if (socketException != null && socketException.SocketErrorCode == SocketError.TimedOut)
-                    return;
-            }
-
-            // "save" exception and set exception wait handle to ensure any waits are interrupted
-            _exception = exp;
-            _exceptionWaitHandle.Set();
-
-            var errorOccured = ErrorOccured;
-            if (errorOccured != null)
-                errorOccured(this, new ExceptionEventArgs(exp));
-
-            if (connectionException != null)
-            {
-                DiagnosticAbstraction.Log(string.Format("[{0}] Disconnecting after exception: {1}", ToHex(SessionId), exp));
-                Disconnect(connectionException.DisconnectReason, exp.ToString());
-            }
-        }
-
-        /// <summary>
         /// Resets connection-specific information to ensure state of a previous connection
         /// does not affect new connections.
         /// </summary>
@@ -2471,7 +1986,7 @@ namespace Renci.SshNet
 
             if (disposing)
             {
-                DiagnosticAbstraction.Log(string.Format("[{0}] Disposing session.", ToHex(SessionId)));
+                DiagnosticAbstraction.Log(string.Format("[{0}] Disposing session.", Session.ToHex(SessionId)));
 
                 Disconnect();
 
@@ -2496,18 +2011,18 @@ namespace Renci.SshNet
                     _keyExchangeCompletedWaitHandle = null;
                 }
 
-                var serverMac = _serverMac;
+                var serverMac = ServerMac;
                 if (serverMac != null)
                 {
                     serverMac.Dispose();
-                    _serverMac = null;
+                    ServerMac = null;
                 }
 
-                var clientMac = _clientMac;
+                var clientMac = ClientMac;
                 if (clientMac != null)
                 {
                     clientMac.Dispose();
-                    _clientMac = null;
+                    ClientMac = null;
                 }
 
                 var keyExchange = _keyExchange;
@@ -2627,6 +2142,29 @@ namespace Renci.SshNet
         }
 
         #endregion ISession implementation
+
+        internal static string ToHex(byte[] bytes)
+        {
+            if (bytes == null)
+                return null;
+
+            return ToHex(bytes, 0);
+        }
+
+        internal static string ToHex(byte[] bytes, int offset)
+        {
+            var byteCount = bytes.Length - offset;
+
+            var builder = new StringBuilder(bytes.Length * 2);
+
+            for (var i = offset; i < byteCount; i++)
+            {
+                var b = bytes[i];
+                builder.Append(b.ToString("X2"));
+            }
+
+            return builder.ToString();
+        }
     }
 
     /// <summary>
@@ -2653,5 +2191,1073 @@ namespace Renci.SshNet
         /// The session is in a failed state.
         /// </summary>
         Failed = 4
+    }
+
+    internal class ServerIdentifiedEventArgs : EventArgs
+    {
+        public string SoftwareName { get; private set; }
+        public string ServerIdentification { get; private set; }
+        public string ProtocolVersion { get; private set; }
+
+        public ServerIdentifiedEventArgs(string serverIdentification, string protocolVersion, string softwareName)
+        {
+            SoftwareName = softwareName;
+            ServerIdentification = serverIdentification;
+            ProtocolVersion = protocolVersion;
+        }
+    }
+
+    internal class AsyncMessageListener : IDisposable
+    {
+        private readonly Session _session;
+        private readonly Socket _socket;
+        private readonly LoadMessageDelegate _loadMessageDelegate;
+        private readonly SocketAsyncEventArgs _readSocketAsyncEventArgs;
+        private readonly SocketAsyncEventArgs _writeSocketAsyncEventArgs;
+
+        /// <summary>
+        /// Specifies outbound packet number
+        /// </summary>
+        private volatile uint _outboundPacketSequence;
+
+        /// <summary>
+        /// Specifies incoming packet number
+        /// </summary>
+        private uint _inboundPacketSequence;
+
+        /// <summary>
+        /// Holds an object that is used to ensure only a single thread can dispose
+        /// <see cref="_socket"/> at any given time.
+        /// </summary>
+        /// <remarks>
+        /// This is also used to ensure that <see cref="_socket"/> will not be disposed
+        /// while performing a given operation or set of operations on <see cref="_socket"/>.
+        /// </remarks>
+        private readonly object _disposeLock;
+
+        /// <summary>
+        /// Holds an object that is used to ensure only a single thread can write to
+        /// <see cref="_socket"/> at any given time.
+        /// </summary>
+        /// <remarks>
+        /// This is also used to ensure that <see cref="_outboundPacketSequence"/> is
+        /// incremented atomatically.
+        /// </remarks>
+        private readonly object _socketWriteLock;
+
+        private readonly object _transitionLock;
+
+        private ListenerState _state;
+        private byte _blockSize;
+        private uint _packetLength;
+        private byte[] _firstBlock;
+        private int _receiveReadOffset;
+        private readonly CountdownEvent _processingCompleted;
+        private readonly AutoResetEvent _sendPacketCompleted;
+        private readonly TimeSpan _timeout;
+
+        public event EventHandler<ServerIdentifiedEventArgs> ServerIdentified;
+        public event EventHandler<EventArgs> Closed;
+        public event EventHandler<ExceptionEventArgs> Error;
+
+        public bool IsConnected
+        {
+            get
+            {
+                return _state == ListenerState.Connected ||
+                       _state == ListenerState.FirstBlockRead ||
+                       _state == ListenerState.Ready;
+            }
+        }
+
+        public AsyncMessageListener(Session session, Socket socket, LoadMessageDelegate loadMessageDelegate)
+        {
+            var buffer = CreateSocketReceiveBuffer();
+
+            _session = session;
+            _socket = socket;
+            _loadMessageDelegate = loadMessageDelegate;
+            _processingCompleted = new CountdownEvent(1);
+            _sendPacketCompleted = new AutoResetEvent(false);
+            _timeout = session.ConnectionInfo.Timeout;
+
+            _socketWriteLock = new object();
+            _transitionLock = new object();
+            _disposeLock = new object();
+
+            _readSocketAsyncEventArgs = new SocketAsyncEventArgs();
+            _readSocketAsyncEventArgs.SetBuffer(buffer, 0, buffer.Length);
+            _readSocketAsyncEventArgs.Completed += SocketOperationCompleted;
+
+            _writeSocketAsyncEventArgs = new SocketAsyncEventArgs();
+            _writeSocketAsyncEventArgs.Completed += SocketOperationCompleted;
+        }
+
+        private static byte[] CreateSocketReceiveBuffer()
+        {
+            return new byte[Session.MaximumSshPacketSize + 3000];
+            //return new byte[10000];
+        }
+
+        private bool ReadServerIdentification(int count)
+        {
+            int bytesRead;
+
+            // Get server version from the server, and ignore any text lines which are sent before
+            var serverVersion = GetLine(_readSocketAsyncEventArgs, _receiveReadOffset, count, out bytesRead);
+            if (serverVersion == null)
+            {
+                return false;
+            }
+
+            var versionMatch = Session.ServerVersionRe.Match(serverVersion);
+            if (!versionMatch.Success)
+            {
+                return false;
+            }
+
+            // Get server SSH version
+            var protocolVersion = versionMatch.Result("${protoversion}");
+            var softwareName = versionMatch.Result("${softwareversion}");
+
+            if (ServerIdentified != null)
+            {
+                ServerIdentified(this, new ServerIdentifiedEventArgs(serverVersion, protocolVersion, softwareName));
+            }
+
+            _receiveReadOffset += bytesRead;
+            return true;
+        }
+
+        public void SendClientIdentification(string clientVersion)
+        {
+            var clientIdentification = Encoding.UTF8.GetBytes(string.Format(CultureInfo.InvariantCulture, "{0}\x0D\x0A", clientVersion));
+            lock (_socketWriteLock)
+            {
+                SendPacketAsync(clientIdentification, 0, clientIdentification.Length);
+                if (!_sendPacketCompleted.WaitOne(_timeout))
+                {
+                    // TODO
+                }
+            }
+        }
+
+        private static string GetLine(SocketAsyncEventArgs sae, int offset, int count, out int bytesRead)
+        {
+            var bytesInLine = 0;
+
+            bytesRead = 0;
+            while (bytesRead < count)
+            {
+                var b = sae.Buffer[offset + bytesRead++];
+                if (b != Session.LineFeed)
+                {
+                    bytesInLine++;
+                    continue;
+                }
+
+                if (bytesInLine == 0)
+                {
+                    // Skip LF
+                    offset++;
+                    continue;
+                }
+
+                string line;
+                if (sae.Buffer[offset + bytesRead - 2] == Session.CarriageReturn)
+                {
+                    line = SshData.Ascii.GetString(sae.Buffer, offset, bytesInLine - 1);
+                }
+                else
+                {
+                    line = SshData.Ascii.GetString(sae.Buffer, offset, bytesInLine);
+                }
+
+                return line;
+            }
+
+            return null;
+        }
+
+        private bool ReadFirstBlock(int count, Cipher serverCipher)
+        {
+            // Determine the size of the first block, which is 8 or cipher block size (whichever is larger) bytes
+            _blockSize = serverCipher == null ? (byte) 8 : Math.Max((byte) 8, serverCipher.MinimumSize);
+
+            if (count < _blockSize)
+            {
+                return false;
+            }
+
+            //  Read first block - which starts with the packet length
+            if (serverCipher != null)
+            {
+                _firstBlock = serverCipher.Decrypt(_readSocketAsyncEventArgs.Buffer, _receiveReadOffset, _blockSize);
+            }
+            else
+            {
+                _firstBlock = new byte[_blockSize];
+                Buffer.BlockCopy(_readSocketAsyncEventArgs.Buffer, _receiveReadOffset, _firstBlock, 0, _blockSize);
+            }
+
+            _packetLength = Pack.BigEndianToUInt32(_firstBlock);
+
+            // Test packet minimum and maximum boundaries
+            if (_packetLength < Math.Max((byte) 16, _blockSize) - 4 || _packetLength > Session.MaximumSshPacketSize - 4)
+                // TODO: publish error event, and attempt to transition to ERROR
+                throw new SshConnectionException(
+                    string.Format(CultureInfo.CurrentCulture, "Bad packet length: {0}.", _packetLength),
+                    DisconnectReason.ProtocolError);
+
+            DiagnosticAbstraction.Log(string.Format("[{0}] Received packet; Length={1}; Blocksize={2}", Session.ToHex(_session.SessionId), _packetLength, _blockSize));
+
+            _receiveReadOffset += _blockSize;
+
+            return true;
+        }
+
+        private Message ReadMessage(int count, HashAlgorithm serverMac, Cipher serverCipher, Compressor serverDecompression)
+        {
+            // the length of the packet sequence field in bytes
+            const int inboundPacketSequenceLength = 4;
+            // The length of the "packet length" field in bytes
+            const int packetLengthFieldLength = 4;
+            // The length of the "padding length" field in bytes
+            const int paddingLengthFieldLength = 1;
+
+            var serverMacLength = serverMac != null ? serverMac.HashSize / 8 : 0;
+
+            // Determine the number of bytes left to read; We've already read "blockSize" bytes, but the
+            // "packet length" field itself - which is 4 bytes - is not included in the length of the packet
+            var bytesToRead = (int) (_packetLength - (_blockSize - packetLengthFieldLength)) + serverMacLength;
+
+            DiagnosticAbstraction.Log(string.Format("[{0}] Reading message (Bytes={1}; Offset={2}; Count={3}).", Session.ToHex(_session.SessionId), bytesToRead, _receiveReadOffset, count));
+
+            if (count < bytesToRead)
+            {
+                return null;
+            }
+
+            // Construct buffer for holding the payload and the inbound packet sequence as we need both in order
+            // to generate the hash.
+            // 
+            // The total length of the "data" buffer is an addition of:
+            // - inboundPacketSequenceLength (4 bytes)
+            // - packetLength
+            // - serverMacLength
+            // 
+            // We include the inbound packet sequence to allow us to have the the full SSH packet in a single
+            // byte[] for the purpose of calculating the client hash. Room for the server MAC is foreseen
+            // to read the packet including server MAC in a single pass (except for the initial block).
+            var data = new byte[bytesToRead + _blockSize + inboundPacketSequenceLength];
+            Pack.UInt32ToBigEndian(_inboundPacketSequence, data);
+            Buffer.BlockCopy(_firstBlock, 0, data, inboundPacketSequenceLength, _firstBlock.Length);
+            Buffer.BlockCopy(_readSocketAsyncEventArgs.Buffer, _receiveReadOffset, data, _blockSize + inboundPacketSequenceLength, bytesToRead);
+
+            if (serverCipher != null)
+            {
+                var numberOfBytesToDecrypt = data.Length - (_blockSize + inboundPacketSequenceLength + serverMacLength);
+                if (numberOfBytesToDecrypt > 0)
+                {
+                    var decryptedData = serverCipher.Decrypt(data, _blockSize + inboundPacketSequenceLength, numberOfBytesToDecrypt);
+                    Buffer.BlockCopy(decryptedData, 0, data, _blockSize + inboundPacketSequenceLength, decryptedData.Length);
+                }
+            }
+
+            _receiveReadOffset += bytesToRead;
+
+            var paddingLength = data[inboundPacketSequenceLength + packetLengthFieldLength];
+            var messagePayloadLength = (int) _packetLength - paddingLength - paddingLengthFieldLength;
+            var messagePayloadOffset = inboundPacketSequenceLength + packetLengthFieldLength + paddingLengthFieldLength;
+
+            // validate message against MAC
+            if (serverMac != null)
+            {
+                var clientHash = serverMac.ComputeHash(data, 0, data.Length - serverMacLength);
+                var serverHash = data.Take(data.Length - serverMacLength, serverMacLength);
+
+                // TODO add IsEqualTo overload that takes left+right index and number of bytes to compare;
+                // TODO that way we can eliminate the extra allocation of the Take above
+                if (!serverHash.IsEqualTo(clientHash))
+                {
+                    // TODO: publish error event, and attempt to transition to ERROR
+                    throw new SshConnectionException("MAC error", DisconnectReason.MacError);
+                }
+            }
+
+            if (serverDecompression != null)
+            {
+                data = serverDecompression.Decompress(data, messagePayloadOffset, messagePayloadLength);
+
+                // data now only contains the decompressed payload, and as such the offset is reset to zero
+                messagePayloadOffset = 0;
+                // the length of the payload is now the complete decompressed content
+                messagePayloadLength = data.Length;
+            }
+
+            _inboundPacketSequence++;
+
+            return _loadMessageDelegate(data, messagePayloadOffset, messagePayloadLength);
+        }
+
+        private void SocketOperationCompleted(object sender, SocketAsyncEventArgs e)
+        {
+            switch (e.LastOperation)
+            {
+                case SocketAsyncOperation.Receive:
+                    ProcessReceive(e);
+                    break;
+                case SocketAsyncOperation.Send:
+                    ProcessSend(e);
+                    break;
+                case SocketAsyncOperation.Disconnect:
+                    ProcessDisconnect(e);
+                    break;
+            }
+        }
+
+        private void ProcessSend(SocketAsyncEventArgs e)
+        {
+            _sendPacketCompleted.Set();
+
+            if (e.SocketError != SocketError.Success)
+            {
+                StartDisconnect(e);
+            }
+        }
+
+        private void ProcessReceive(SocketAsyncEventArgs e)
+        {
+            if (e.BytesTransferred == 0 || e.SocketError != SocketError.Success)
+            {
+                if (e.BytesTransferred == 0)
+                {
+                    DiagnosticAbstraction.Log(string.Format("[{0}] Socket closed by server.", Session.ToHex(_session.SessionId)));
+                }
+                else
+                {
+                    DiagnosticAbstraction.Log(string.Format("[{0}] Socket error '{1}'.", Session.ToHex(_session.SessionId), e.SocketError));
+                }
+
+                Transition(ListenerState.Closed);
+                StartDisconnect(e);
+                return;
+            }
+
+            if (!_socket.Connected)
+            {
+                DiagnosticAbstraction.Log(string.Format("[{0}] Socket not connected. Ignoring received data (Offset={1}; BytesTransferrer={2}).", Session.ToHex(_session.SessionId), e.Offset, e.BytesTransferred));
+                return;
+            }
+
+            DiagnosticAbstraction.Log(string.Format("[{0}] Received data; Offset={1}; BytesTransferrer={2}", Session.ToHex(_session.SessionId), e.Offset, e.BytesTransferred));
+
+            _processingCompleted.AddCount();
+            try
+            {
+                ProcessReceivedData((e.Offset - _receiveReadOffset) + e.BytesTransferred, _readSocketAsyncEventArgs.Offset + _readSocketAsyncEventArgs.BytesTransferred);
+            }
+            finally
+            {
+                _processingCompleted.Signal();
+            }
+        }
+
+        public void Stop()
+        {
+            DiagnosticAbstraction.Log(string.Format("[{0}] Stopping listener.", Session.ToHex(_session.SessionId)));
+
+            lock (_transitionLock)
+            {
+                if (_state == ListenerState.Disposed)
+                {
+                    throw new ObjectDisposedException(GetType().Name);
+                }
+
+                if (!Transition(ListenerState.Stopped))
+                {
+                    return;
+                }
+            }
+
+            lock (_disposeLock)
+            {
+                if (_state == ListenerState.Stopped)
+                {
+                    DoStop();
+                }
+            }
+        }
+
+        private void ProcessReceivedData(int count, int totalBytesReceived)
+        {
+            DiagnosticAbstraction.Log(string.Format("[{0}] Processing data (Offset={1}; Count={2}, State={3}).", Session.ToHex(_session.SessionId), _receiveReadOffset, count, _state));
+
+            if (_state == ListenerState.Connected)
+            {
+                if (ReadServerIdentification(count))
+                {
+                    Transition(ListenerState.Ready);
+                    if (_receiveReadOffset < totalBytesReceived)
+                    {
+                        ProcessReceivedData(totalBytesReceived - _receiveReadOffset, totalBytesReceived);
+                        return;
+                    }
+                    if (_receiveReadOffset == totalBytesReceived)
+                    {
+                        _receiveReadOffset = 0;
+                        _readSocketAsyncEventArgs.SetBuffer(0, _readSocketAsyncEventArgs.Buffer.Length);
+                    }
+                }
+                else
+                {
+                    _readSocketAsyncEventArgs.SetBuffer(totalBytesReceived, _readSocketAsyncEventArgs.Buffer.Length - totalBytesReceived);
+                }
+            }
+            else if (_state == ListenerState.Ready)
+            {
+                if (ReadFirstBlock(count, _session.ServerCipher))
+                {
+                    Transition(ListenerState.FirstBlockRead);
+                    if (_receiveReadOffset < totalBytesReceived)
+                    {
+                        ProcessReceivedData(totalBytesReceived - _receiveReadOffset, totalBytesReceived);
+                        return;
+                    }
+                    if (_receiveReadOffset == totalBytesReceived)
+                    {
+                        _receiveReadOffset = 0;
+                        _readSocketAsyncEventArgs.SetBuffer(0, _readSocketAsyncEventArgs.Buffer.Length);
+                    }
+                }
+                else
+                {
+                    _readSocketAsyncEventArgs.SetBuffer(totalBytesReceived, _readSocketAsyncEventArgs.Buffer.Length - totalBytesReceived);
+                }
+            }
+            else if (_state == ListenerState.FirstBlockRead)
+            {
+                var message = ReadMessage(count, _session.ServerMac, _session.ServerCipher, _session.ServerDecompression);
+                if (message != null)
+                {
+                    message.Process(_session);
+                    Transition(ListenerState.Ready);
+                    if (_receiveReadOffset < totalBytesReceived)
+                    {
+                        ProcessReceivedData(totalBytesReceived - _receiveReadOffset, totalBytesReceived);
+                        return;
+                    }
+                    if (_receiveReadOffset == totalBytesReceived)
+                    {
+                        _receiveReadOffset = 0;
+                        _readSocketAsyncEventArgs.SetBuffer(0, _readSocketAsyncEventArgs.Buffer.Length);
+                    }
+                }
+                else
+                {
+                    _readSocketAsyncEventArgs.SetBuffer(totalBytesReceived, _readSocketAsyncEventArgs.Buffer.Length - totalBytesReceived);
+                }
+            }
+            else if (_state == ListenerState.Stopped)
+            {
+                DiagnosticAbstraction.Log(string.Format("[{0}] Listener stopping. Ignoring data (Offset={1}; Count={2}).", Session.ToHex(_session.SessionId), _receiveReadOffset, count));
+                return;
+            }
+            else if (_state == ListenerState.Disposed)
+            {
+                DiagnosticAbstraction.Log(string.Format("[{0}] Listener disposed. Ignoring data (Offset={1}; Count={2}).", Session.ToHex(_session.SessionId), _receiveReadOffset, count));
+                return;
+            }
+            else
+            {
+                DiagnosticAbstraction.Log(string.Format("[{0}] Unexpected listener state '{1}'. Ignoring data (Offset={2}; Count={3}).", Session.ToHex(_session.SessionId), _state, _receiveReadOffset, count));
+            }
+
+            StartReceive();
+        }
+
+        private void DoStop()
+        {
+            if (_processingCompleted.IsSet)
+            {
+                return;
+            }
+
+            _processingCompleted.Signal();
+            _processingCompleted.Wait(Session.InfiniteTimeSpan);
+            RaiseClosedEvent();
+        }
+
+        private bool Transition(ListenerState newState)
+        {
+            lock (_transitionLock)
+            {
+                var currentState = _state;
+
+                if (currentState == ListenerState.FirstBlockRead)
+                {
+                    if (newState == ListenerState.Ready)
+                    {
+                        _state = newState;
+                    }
+                    else if (newState == ListenerState.FirstBlockRead)
+                    {
+                        _state = newState;
+                    }
+                    else if (newState == ListenerState.Stopped)
+                    {
+                        _state = newState;
+                    }
+                    else if (newState == ListenerState.Closed)
+                    {
+                        _state = newState;
+                        RaiseClosedEvent();
+                    }
+                    else if (newState == ListenerState.Disposed)
+                    {
+                        _state = newState;
+                    }
+                    else
+                    {
+                        _state = ListenerState.Error;
+                        RaiseErrorEvent(CreateTransitionNodeAllowedException(currentState, newState));
+                        return false;
+                    }
+                }
+                else if (currentState == ListenerState.Ready)
+                {
+                    if (newState == ListenerState.Ready)
+                    {
+                    }
+                    else if (newState == ListenerState.FirstBlockRead)
+                    {
+                        _state = newState;
+                    }
+                    else if (newState == ListenerState.Stopped)
+                    {
+                        _state = newState;
+                    }
+                    else if (newState == ListenerState.Closed)
+                    {
+                        _state = newState;
+                        RaiseClosedEvent();
+                    }
+                    else if (newState == ListenerState.Disposed)
+                    {
+                        _state = newState;
+                    }
+                    else
+                    {
+                        _state = ListenerState.Error;
+                        RaiseErrorEvent(CreateTransitionNodeAllowedException(currentState, newState));
+                        return false;
+                    }
+                }
+                else if (currentState == ListenerState.Connected)
+                {
+                    if (newState == ListenerState.Ready)
+                    {
+                        _state = newState;
+                    }
+                    else if (newState == ListenerState.Stopped)
+                    {
+                        _state = newState;
+                    }
+                    else if (newState == ListenerState.Closed)
+                    {
+                        _state = newState;
+                        RaiseClosedEvent();
+                    }
+                    else
+                    {
+                        _state = ListenerState.Error;
+                        RaiseErrorEvent(CreateTransitionNodeAllowedException(currentState, newState));
+                        return false;
+                    }
+                }
+                else if (currentState == ListenerState.Stopped)
+                {
+                    if (newState == ListenerState.Stopped)
+                    {
+                    }
+                    else if (newState == ListenerState.Disposed)
+                    {
+                        _state = newState;
+                    }
+                    else if (newState == ListenerState.Closed)
+                    {
+                        _state = newState;
+                        // no need to raise Closed event, since this will be done as part of the DoStop method
+                        //RaiseClosedEvent();
+                    }
+                    else
+                    {
+                        _state = ListenerState.Error;
+                        RaiseErrorEvent(CreateTransitionNodeAllowedException(currentState, newState));
+                        return false;
+                    }
+                }
+                else if (currentState == ListenerState.Closed)
+                {
+                    if (newState == ListenerState.Stopped)
+                    {
+                        _state = newState;
+                    }
+                    else if (newState == ListenerState.Disposed)
+                    {
+                        _state = newState;
+                    }
+                    else if (newState == ListenerState.Closed)
+                    {
+                    }
+                    else
+                    {
+                        _state = ListenerState.Error;
+                        RaiseErrorEvent(CreateTransitionNodeAllowedException(currentState, newState));
+                        return false;
+                    }
+                }
+                else if (currentState == ListenerState.Disposed)
+                {
+                    if (newState == ListenerState.Closed)
+                    {
+                        // no need to raise Closed event, since this will be done as part of the DoStop method
+                        //RaiseClosedEvent();
+
+                    }
+                    else if (newState == ListenerState.Disposed)
+                    {
+                        return false;
+                    }
+                    else
+                    {
+                        RaiseErrorEvent(CreateTransitionNodeAllowedException(currentState, newState));
+                        return false;
+                    }
+                }
+                else
+                {
+                    _state = ListenerState.Error;
+                    RaiseErrorEvent(CreateTransitionNodeAllowedException(currentState, newState));
+                    return false;
+                }
+
+                return true;
+            }
+        }
+
+        private static SshException CreateTransitionNodeAllowedException(ListenerState currentState, ListenerState newState)
+        {
+            return new SshException(string.Format(CultureInfo.InvariantCulture, "Transition from '{0}' to '{1} is not allowed.", currentState.ToString(), newState.ToString()));
+        }
+
+        private void RaiseClosedEvent()
+        {
+            var closed = Closed;
+            if (closed != null)
+            {
+                closed(this, new EventArgs());
+            }
+        }
+
+        private void RaiseErrorEvent(Exception cause)
+        {
+            var error = Error;
+            if (error != null)
+            {
+                error(this, new ExceptionEventArgs(cause));
+            }
+        }
+
+        public void Start()
+        {
+            if (_state == ListenerState.Disposed)
+            {
+                throw new ObjectDisposedException(GetType().Name);
+            }
+
+            _state = ListenerState.Connected;
+            StartReceive();
+        }
+
+        private void StartReceive()
+        {
+            DiagnosticAbstraction.Log(string.Format("[{0}] Start receiving; Offset={1}; Count={2}.", Session.ToHex(_session.SessionId), _readSocketAsyncEventArgs.Offset, _readSocketAsyncEventArgs.Count));
+
+            try
+            {
+                if (!_socket.ReceiveAsync(_readSocketAsyncEventArgs))
+                {
+                    SocketOperationCompleted(this, _readSocketAsyncEventArgs);
+                }
+            }
+            catch (ObjectDisposedException)
+            {
+                // TODO: publish error event, and attempt to transition to ERROR
+                DiagnosticAbstraction.Log(string.Format("[{0}] Socket disposed. Stopped receiving.", Session.ToHex(_session.SessionId)));
+            }
+        }
+
+        private static SshConnectionException CreateConnectionAbortedByServerException()
+        {
+            return new SshConnectionException("An established connection was aborted by the server.",
+                                              DisconnectReason.ConnectionLost);
+        }
+
+        internal delegate Message LoadMessageDelegate(byte[] data, int offset, int count);
+
+        private void StartDisconnect(SocketAsyncEventArgs e)
+        {
+            if (_socket.Connected)
+            {
+                try
+                {
+                    DiagnosticAbstraction.Log(string.Format("[{0}] Shutting down socket.", Session.ToHex(_session.SessionId)));
+
+                    // interrupt any pending reads; should be done outside of socket read lock as we
+                    // actually want shutdown the socket to make sure blocking reads are interrupted
+                    //
+                    // this may result in a SocketException (eg. An existing connection was forcibly
+                    // closed by the remote host) which we'll log and ignore as it means the socket
+                    // was already shut down
+                    _socket.Shutdown(SocketShutdown.Both);
+                }
+                catch (SocketException ex)
+                {
+                    // TODO: log as warning
+                    DiagnosticAbstraction.Log("Failure shutting down socket: " + ex);
+                }
+            }
+
+            if (!_socket.DisconnectAsync(e))
+            {
+                ProcessDisconnect(e);
+            }
+        }
+
+        /// <summary>
+        /// Shuts down and disposes the socket.
+        /// </summary>
+        private void SocketDisconnectAndDispose()
+        {
+            if (_socket.Connected)
+            {
+                try
+                {
+                    DiagnosticAbstraction.Log(string.Format("[{0}] Shutting down socket.", Session.ToHex(_session.SessionId)));
+
+                    // interrupt any pending reads; should be done outside of socket read lock as we
+                    // actually want shutdown the socket to make sure blocking reads are interrupted
+                    //
+                    // this may result in a SocketException (eg. An existing connection was forcibly
+                    // closed by the remote host) which we'll log and ignore as it means the socket
+                    // was already shut down
+                    _socket.Shutdown(SocketShutdown.Both);
+                }
+                catch (SocketException ex)
+                {
+                    // TODO: log as warning
+                    DiagnosticAbstraction.Log("Failure shutting down socket: " + ex);
+                }
+            }
+
+            DiagnosticAbstraction.Log(string.Format("[{0}] Disposing socket.", Session.ToHex(_session.SessionId)));
+            _socket.Dispose();
+            DiagnosticAbstraction.Log(string.Format("[{0}] Disposed socket.", Session.ToHex(_session.SessionId)));
+        }
+
+        private void ProcessDisconnect(SocketAsyncEventArgs e)
+        {
+            if (e.SocketError != SocketError.Success)
+            {
+                DiagnosticAbstraction.Log("Failure disconnecting socket: " + e.SocketError);
+            }
+
+            DiagnosticAbstraction.Log(string.Format("[{0}] Closing socket.", Session.ToHex(_session.SessionId)));
+            _socket.Dispose();
+            DiagnosticAbstraction.Log(string.Format("[{0}] Closed socket.", Session.ToHex(_session.SessionId)));
+        }
+
+        public void SendMessage(Message message)
+        {
+            DiagnosticAbstraction.Log(string.Format("[{0}] Sending message '{1}' to server: '{2}'.", Session.ToHex(_session.SessionId), message.GetType().Name, message));
+
+            var clientCipher = _session.ClientCipher;
+            var serverCipher = _session.ServerCipher;
+            var clientMac  = _session.ClientMac;
+
+            var paddingMultiplier = clientCipher == null ? (byte) 8 : Math.Max((byte) 8, serverCipher.MinimumSize);
+            var packetData = message.GetPacket(paddingMultiplier, _session.ClientCompression);
+
+            // take a write lock to ensure the outbound packet sequence number is incremented
+            // atomically, and only after the packet has actually been sent
+            lock (_socketWriteLock)
+            {
+                byte[] hash = null;
+                var packetDataOffset = 4; // first four bytes are reserved for outbound packet sequence
+
+                if (clientMac != null)
+                {
+                    // write outbound packet sequence to start of packet data
+                    Pack.UInt32ToBigEndian(_outboundPacketSequence, packetData);
+                    //  calculate packet hash
+                    hash = clientMac.ComputeHash(packetData);
+                }
+
+                // Encrypt packet data
+                if (clientCipher != null)
+                {
+                    packetData = clientCipher.Encrypt(packetData, packetDataOffset, (packetData.Length - packetDataOffset));
+                    packetDataOffset = 0;
+                }
+
+                if (packetData.Length > Session.MaximumSshPacketSize)
+                {
+                    // TODO: publish error event, and transition to ERROR state
+
+                    throw new InvalidOperationException(string.Format(CultureInfo.CurrentCulture, "Packet is too big. Maximum packet size is {0} bytes.", Session.MaximumSshPacketSize));
+                }
+
+                var packetLength = packetData.Length - packetDataOffset;
+                if (hash == null)
+                {
+                    SendPacketAsync(packetData, packetDataOffset, packetLength);
+                    if (!_sendPacketCompleted.WaitOne(_timeout))
+                    {
+                        // TODO: publish error event, and transition to ERROR state
+                    }
+                }
+                else
+                {
+                    SendPacketAsync(packetData, packetDataOffset, packetLength);
+                    if (!_sendPacketCompleted.WaitOne(_timeout))
+                    {
+                        // TODO: publish error event, and transition to ERROR state
+                    }
+                    SendPacketAsync(hash, 0, hash.Length);
+                    if (!_sendPacketCompleted.WaitOne(_timeout))
+                    {
+                        // TODO: publish error event, and transition to ERROR state
+                    }
+                }
+
+                // increment the packet sequence number only after we're sure the packet has
+                // been sent; even though it's only used for the MAC, it needs to be incremented
+                // for each package sent.
+                // 
+                // the server will use it to verify the data integrity, and as such the order in
+                // which messages are sent must follow the outbound packet sequence number
+                _outboundPacketSequence++;
+            }
+        }
+
+        /// <summary>
+        /// Sends an SSH packet to the server.
+        /// </summary>
+        /// <param name="packet">A byte array containing the packet to send.</param>
+        /// <param name="offset">The offset of the packet.</param>
+        /// <param name="length">The length of the packet.</param>
+        /// <exception cref="SshConnectionException">Client is not connected to the server.</exception>
+        /// <remarks>
+        /// <para>
+        /// The send is performed in a dispose lock to avoid <see cref="NullReferenceException"/>
+        /// and/or <see cref="ObjectDisposedException"/> when sending the packet.
+        /// </para>
+        /// <para>
+        /// This method is only to be used when the connection is established, as the locking
+        /// overhead is not required while establising the connection.
+        /// </para>
+        /// </remarks>
+        private void SendPacketAsync(byte[] packet, int offset, int length)
+        {
+            lock (_disposeLock)
+            {
+                if (!_socket.Connected)
+                {
+                    // TODO: publish error event, and transition to ERROR state
+                    throw new SshConnectionException("Client not connected.");
+                }
+
+                _writeSocketAsyncEventArgs.SetBuffer(packet, offset, length);
+                if (!_socket.SendAsync(_writeSocketAsyncEventArgs))
+                {
+                    SocketOperationCompleted(this, _writeSocketAsyncEventArgs);
+                }
+            }
+        }
+
+        protected void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                lock (_disposeLock)
+                {
+                    if (Transition(ListenerState.Disposed))
+                    {
+                        DoStop();
+
+                        SocketDisconnectAndDispose();
+
+                        _readSocketAsyncEventArgs.Dispose();
+                        _writeSocketAsyncEventArgs.Dispose();
+
+                        _processingCompleted.Dispose();
+                        _sendPacketCompleted.Dispose();
+                    }
+                }
+            }
+        }
+
+        public void Dispose()
+        {
+            DiagnosticAbstraction.Log(string.Format("[{0}] Disposing listener.", Session.ToHex(_session.SessionId)));
+
+            Dispose(true);
+            GC.SuppressFinalize(this);
+        }
+
+        public enum ListenerState
+        {
+            Initial = 1,
+            Connected = 2,
+            Ready = 3,
+            FirstBlockRead = 4,
+            Stopped = 5,
+            Error = 6,
+            Closed = 7,
+            Disposed = 8
+        }
+
+        /*
+        public class ListenerState
+        {
+            public static readonly ListenerState Initial = new ListenerState(1, "Initial");
+            public static readonly ListenerState Connected = new ListenerState(2, "Connected");
+            public static readonly ListenerState Ready = new ListenerState(3, "Ready");
+            public static readonly ListenerState FirstBlockRead = new ListenerState(4, "FirstBlockRead");
+            public static readonly ListenerState Stopped = new ListenerState(5, "Stopped");
+            public static readonly ListenerState Error = new ListenerState(6, "Error");
+            public static readonly ListenerState Closed = new ListenerState(7, "Closed");
+            public static readonly ListenerState Disposed = new ListenerState(8, "Disposed");
+
+            private readonly int _value;
+            private readonly string _name;
+
+            private ListenerState(int value, string name)
+            {
+                _value = value;
+                _name = name;
+            }
+
+            public override bool Equals(object other)
+            {
+                var otherState = other as ListenerState;
+                if (otherState == null)
+                    return false;
+
+                return _value == otherState._value;
+            }
+
+            public override int GetHashCode()
+            {
+                return _value;
+            }
+
+            public static bool operator ==(ListenerState x, ListenerState y)
+            {
+                if (ReferenceEquals(x, null))
+                    return ReferenceEquals(y, null);
+                if (ReferenceEquals(y, null))
+                    return false;
+
+                return x._value == y._value;
+            }
+
+            public static bool operator !=(ListenerState x, ListenerState y)
+            {
+                return !(x == y);
+            }
+
+            public override string ToString()
+            {
+                return _name;
+            }
+        }
+        */
+    }
+
+    internal interface ISocketConnector
+    {
+        Socket Connect();
+    }
+
+    internal class RawSocketConnector : SocketConnectorBase
+    {
+        private readonly string _host;
+        private readonly int _port;
+        private readonly TimeSpan _timeout;
+
+        public RawSocketConnector(string host, int port, TimeSpan timeout)
+        {
+            _host = host;
+            _port = port;
+            _timeout = timeout;
+        }
+
+        public override Socket Connect()
+        {
+            return ConnectSocket(_host, _port, _timeout);
+        }
+    }
+
+    internal abstract class SocketConnectorBase : ISocketConnector
+    {
+        public abstract Socket Connect();
+
+        protected static Socket ConnectSocket(string host, int port, TimeSpan timeout)
+        {
+            var ipAddress = DnsAbstraction.GetHostAddresses(host)[0];
+            var ep = new IPEndPoint(ipAddress, port);
+
+            DiagnosticAbstraction.Log(string.Format("Initiating connection to '{0}:{1}'.", host, port));
+
+            var socket = SocketAbstraction.Connect(ep, timeout);
+
+            const int socketBufferSize = 2 * Session.MaximumSshPacketSize;
+            socket.SendBufferSize = socketBufferSize;
+            socket.ReceiveBufferSize = socketBufferSize;
+
+            return socket;
+        }
+    }
+
+    internal class SocketReadBuffer
+    {
+        private readonly byte[] _buffer;
+
+        public SocketReadBuffer(byte[] buffer)
+        {
+            _buffer = buffer;
+        }
+
+        public byte[] Buffer
+        {
+            get { return _buffer; }
+        }
+
+        public void Reset()
+        {
+            Position = 0;
+            Size = 0;
+        }
+
+        public int Size { get; private set; }
+
+        public int Position { get; private set; }
+
+        public void Advance(int length)
+        {
+            Position += length;
+        }
     }
 }
