@@ -47,5 +47,24 @@ namespace Renci.SshNet.Abstractions
             #error Execution of action in a separate thread is not implemented.
 #endif
         }
+
+        /// <summary>
+        /// Executes the specified action in a separate thread.
+        /// </summary>
+        /// <param name="action">The action to execute.</param>
+        /// <param name="state">An object containing data to be used by the <paramref name="action"/> delegate.</param>
+        public static void ExecuteThread<T>(Action<object> action, object state)
+        {
+#if FEATURE_THREAD_THREADPOOL
+            if (action == null)
+                throw new ArgumentNullException("action");
+
+            System.Threading.ThreadPool.QueueUserWorkItem(o => action(state), state);
+#elif FEATURE_THREAD_TAP
+            System.Threading.Tasks.Task.Factory.StartNew(action, state);
+#else
+            #error Execution of action in a separate thread is not implemented.
+#endif
+        }
     }
 }
