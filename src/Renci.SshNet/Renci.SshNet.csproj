@@ -8,13 +8,13 @@
     <LangVersion>5</LangVersion>
     <SignAssembly>true</SignAssembly>
     <TargetFrameworks>net35;net40;netstandard1.3;netstandard2.0</TargetFrameworks>
+    <!-- Do not warn for target frameworks that are out of support -->
+    <NoWarn>$(NoWarn);<NETSDK1138</NoWarn>
   </PropertyGroup>
 
-  <!--
-  <PropertyGroup Condition=" '$(VisualStudioVersion)' == '16.0' ">
-    <TargetFrameworks>net35;net40;netstandard1.3;netstandard2.0;netstandard2.1</TargetFrameworks>
+  <PropertyGroup Condition=" '$(VisualStudioVersion)' == '16.0' and $([MSBuild]::IsOsPlatform('Linux'))">
+    <TargetFrameworks>netstandard1.3;netstandard2.0</TargetFrameworks>
   </PropertyGroup>
-  -->
 
   <ItemGroup Condition=" '$(TargetFramework)' == 'netstandard1.3' ">
     <PackageReference Include="SshNet.Security.Cryptography" Version="[1.3.0]" />

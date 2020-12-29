@@ -2,13 +2,18 @@
   <PropertyGroup>
     <SignAssembly>true</SignAssembly>
     <AssemblyOriginatorKeyFile>..\Renci.SshNet.snk</AssemblyOriginatorKeyFile>
+    <!-- Do not warn for target frameworks that are out of support -->
+    <NoWarn>$(NoWarn);<NETSDK1138</NoWarn>
   </PropertyGroup>
 
   <PropertyGroup Condition=" '$(VisualStudioVersion)' == '15.0' ">
     <TargetFrameworks>net35;net40;netcoreapp2.1;netcoreapp2.2</TargetFrameworks>
   </PropertyGroup>
-  <PropertyGroup Condition=" '$(VisualStudioVersion)' == '16.0' ">
+  <PropertyGroup Condition=" '$(VisualStudioVersion)' == '16.0' and $([MSBuild]::IsOsPlatform('Windows'))">
     <TargetFrameworks>net35;net40;netcoreapp2.1;netcoreapp2.2;netcoreapp3.0</TargetFrameworks>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(VisualStudioVersion)' == '16.0' and $([MSBuild]::IsOsPlatform('Linux'))">
+    <TargetFrameworks>netcoreapp2.1;netcoreapp2.2;netcoreapp3.0</TargetFrameworks>
   </PropertyGroup>
 
   <PropertyGroup Condition=" '$(TargetFramework)' == 'net35' ">
