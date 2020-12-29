@@ -3,7 +3,7 @@
     <SignAssembly>true</SignAssembly>
     <AssemblyOriginatorKeyFile>..\Renci.SshNet.snk</AssemblyOriginatorKeyFile>
     <!-- Do not warn for target frameworks that are out of support -->
-    <NoWarn>$(NoWarn);<NETSDK1138</NoWarn>
+    <NoWarn>$(NoWarn);NETSDK1138</NoWarn>
   </PropertyGroup>
 
   <PropertyGroup Condition=" '$(VisualStudioVersion)' == '15.0' ">
