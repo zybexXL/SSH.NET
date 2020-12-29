@@ -3,14 +3,11 @@ image:
   - Ubuntu
 
 before_build:
-  - nuget restore src\Renci.SshNet.VS2019.sln
+  - nuget restore src/Renci.SshNet.VS2019.sln
 
 build:
+  project: src/Renci.SshNet.VS2019.sln
   verbosity: minimal
-  
-  matrix:
-    - project: src\Renci.SshNet.VS2019.sln
-    - project: src/Renci.SshNet.VS2019.sln    
 
 test_script:
 - cmd: >-
