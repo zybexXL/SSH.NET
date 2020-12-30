@@ -119,24 +119,41 @@ namespace Renci.SshNet.Tests.Common
             var listener = (Socket) ar.AsyncState;
 
             // Get the socket that handles the client request
-            var handler = listener.EndAccept(ar);
+            Socket handler;
+
+            try
+            {
+                handler = listener.EndAccept(ar);
+            }
+            catch (ObjectDisposedException ex)
+            {
+                // The listener is stopped through a Dispose() call, which in turn causes
+                // Socket.EndAccept(IAsyncResult) to throw an ObjectDisposedException
+                //
+                // Since we consider this ObjectDisposedException normal when the listener
+                // is being stopped, we only write a message to stderr if the listener
+                // is considered to be up and running
+                if (_started)
+                {
+                    Console.Error.WriteLine("[{0}] Failure accepting new connection: {1}",
+                                            typeof(AsyncSocketListener).FullName,
+                                            ex);
+                }
+
+                return;
+            }
 
             // Signal new connection
             SignalConnected(handler);
 
-            // Register client socket
-            _connectedClients.Add(handler);
+            lock (_syncLock)
+            {
+                // Register client socket
+                _connectedClients.Add(handler);
+            }
 
-            try
-            {
-                var state = new SocketStateObject(handler);
-                handler.BeginReceive(state.Buffer, 0, state.Buffer.Length, 0, ReadCallback, state);
-            }
-            catch (ObjectDisposedException)
-            {
-                // when the socket is closed, an ObjectDisposedException is thrown
-                // by Socket.EndAccept(IAsyncResult)
-            }
+            var state = new SocketStateObject(handler);
+            handler.BeginReceive(state.Buffer, 0, state.Buffer.Length, 0, ReadCallback, state);
         }
 
         private void ReadCallback(IAsyncResult ar)
