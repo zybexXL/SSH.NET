@@ -45,5 +45,38 @@ namespace Renci.SshNet.Security.Cryptography.Ciphers.Paddings
 
             return output;
         }
+
+        /// <summary>
+        /// Removes padding by resizing the array.
+        /// </summary>
+        /// <param name="data">The output of a Cipher operation.</param>
+        public override void Unpad(ref byte[] data)
+        {
+            var paddinglength = data[data.Length - 1];
+            var newSize = data.Length - paddinglength;
+            if (paddinglength > 0 && newSize > 0)
+            {
+                Array.Resize(ref data, newSize);
+            }
+        }
+
+        /// <summary>
+        /// Removes padding.
+        /// </summary>
+        /// <param name="data">The output of a Cipher operation.</param>
+        /// <returns>The unpadded data array.</returns>
+        public override byte[] Unpad(byte[] data)
+        {
+            var paddinglength = data[data.Length - 1];
+            var newSize = data.Length - paddinglength;
+            if (paddinglength > 0 && newSize > 0)
+            {
+                var output = new byte[newSize];
+                Buffer.BlockCopy(data, 0, output, 0, newSize);
+                return output;
+            }
+
+            return data;
+        }
     }
 }

@@ -54,5 +54,20 @@
         /// The padded data array.
         /// </returns>
         public abstract byte[] Pad(byte[] input, int offset, int length, int paddinglength);
+
+        /// <summary>
+        /// Removes padding from the specified array by resizing it.
+        /// </summary>
+        /// <param name="data">The padded cipher output.</param>
+        public abstract void Unpad(ref byte[] data);
+
+        /// <summary>
+        /// Removes padding from the specified array.
+        /// </summary>
+        /// <param name="data">The padded cipher output.</param>
+        /// <returns>
+        /// The unpadded data array.
+        /// </returns>
+        public abstract byte[] Unpad(byte[] data);
     }
 }

@@ -220,7 +220,7 @@ namespace Renci.SshNet
                         cipher = new CipherInfo(192, (key, iv) => new TripleDesCipher(key, new CbcCipherMode(iv), new PKCS7Padding()));
                         break;
                     case "DES-EDE3-CFB":
-                        cipher = new CipherInfo(192, (key, iv) => new TripleDesCipher(key, new CfbCipherMode(iv), new PKCS7Padding()));
+                        cipher = new CipherInfo(192, (key, iv) => new TripleDesCipher(key, new CfbCipherMode(iv), padding: null));
                         break;
                     case "DES-CBC":
                         cipher = new CipherInfo(64, (key, iv) => new DesCipher(key, new CbcCipherMode(iv), new PKCS7Padding()));
@@ -306,7 +306,7 @@ namespace Renci.SshNet
                         }
 
                         var key = GetCipherKey(passPhrase, 192 / 8);
-                        var ssh2Сipher = new TripleDesCipher(key, new CbcCipherMode(new byte[8]), new PKCS7Padding());
+                        var ssh2Сipher = new TripleDesCipher(key, new CbcCipherMode(new byte[8]), padding: null);
                         keyData = ssh2Сipher.Decrypt(reader.ReadBytes(blobSize));
                     }
                     else

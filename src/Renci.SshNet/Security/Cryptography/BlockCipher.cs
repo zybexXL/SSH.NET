@@ -74,13 +74,9 @@ namespace Renci.SshNet.Security.Cryptography
         /// </returns>
         public override byte[] Encrypt(byte[] input, int offset, int length)
         {
-            if (length % _blockSize > 0)
+            if (_padding is not null)
             {
-                if (_padding is null)
-                {
-                    throw new ArgumentException("data");
-                }
-
+                // padding always changes the array size, even if it's already block-aligned
                 var paddingLength = _blockSize - (length % _blockSize);
                 input = _padding.Pad(input, offset, length, paddingLength);
                 length += paddingLength;
@@ -90,15 +86,16 @@ namespace Renci.SshNet.Security.Cryptography
             var output = new byte[length];
             var writtenBytes = 0;
 
-            for (var i = 0; i < length / _blockSize; i++)
+            for (var i = offset; i < length; i += _blockSize)
             {
+                var count = Math.Min(_blockSize, length - i);
                 if (_mode is null)
                 {
-                    writtenBytes += EncryptBlock(input, offset + (i * _blockSize), _blockSize, output, i * _blockSize);
+                    writtenBytes += EncryptBlock(input, i, count, output, i - offset);
                 }
                 else
                 {
-                    writtenBytes += _mode.EncryptBlock(input, offset + (i * _blockSize), _blockSize, output, i * _blockSize);
+                    writtenBytes += _mode.EncryptBlock(input, i, count, output, i - offset);
                 }
             }
 
@@ -133,30 +130,18 @@ namespace Renci.SshNet.Security.Cryptography
         /// </returns>
         public override byte[] Decrypt(byte[] input, int offset, int length)
         {
-            if (length % _blockSize > 0)
-            {
-                if (_padding is null)
-                {
-                    throw new ArgumentException("data");
-                }
-
-                input = _padding.Pad(_blockSize, input, offset, length);
-                offset = 0;
-                length = input.Length;
-            }
-
             var output = new byte[length];
-
             var writtenBytes = 0;
-            for (var i = 0; i < length / _blockSize; i++)
+            for (var i = offset; i < length; i += _blockSize)
             {
+                var count = Math.Min(_blockSize, length - i);
                 if (_mode is null)
                 {
-                    writtenBytes += DecryptBlock(input, offset + (i * _blockSize), _blockSize, output, i * _blockSize);
+                    writtenBytes += DecryptBlock(input, i, count, output, i - offset);
                 }
                 else
                 {
-                    writtenBytes += _mode.DecryptBlock(input, offset + (i * _blockSize), _blockSize, output, i * _blockSize);
+                    writtenBytes += _mode.DecryptBlock(input, i, count, output, i - offset);
                 }
             }
 
@@ -164,6 +149,9 @@ namespace Renci.SshNet.Security.Cryptography
             {
                 throw new InvalidOperationException("Encryption error.");
             }
+
+            // remove Padding (if padding enabled)
+            _padding?.Unpad(ref output);
 
             return output;
         }
