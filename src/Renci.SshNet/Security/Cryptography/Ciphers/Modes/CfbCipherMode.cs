@@ -33,32 +33,31 @@ namespace Renci.SshNet.Security.Cryptography.Ciphers.Modes
         /// </returns>
         public override int EncryptBlock(byte[] inputBuffer, int inputOffset, int inputCount, byte[] outputBuffer, int outputOffset)
         {
-            if (inputBuffer.Length - inputOffset < _blockSize)
+            if (inputOffset + inputCount > inputBuffer.Length)
             {
                 throw new ArgumentException("Invalid input buffer");
             }
 
-            if (outputBuffer.Length - outputOffset < _blockSize)
+            if (outputOffset + inputCount > outputBuffer.Length)
             {
                 throw new ArgumentException("Invalid output buffer");
             }
 
-            if (inputCount != _blockSize)
+            if (inputCount <= 0 || inputCount > _blockSize)
             {
-                throw new ArgumentException(string.Format(CultureInfo.CurrentCulture, "inputCount must be {0}.", _blockSize));
+                throw new ArgumentException(string.Format(CultureInfo.CurrentCulture, "inputCount must be between 1 and {0}.", _blockSize));
             }
 
             _ = Cipher.EncryptBlock(IV, 0, IV.Length, _ivOutput, 0);
 
-            for (var i = 0; i < _blockSize; i++)
+            for (var i = 0; i < inputCount; i++)
             {
                 outputBuffer[outputOffset + i] = (byte)(_ivOutput[i] ^ inputBuffer[inputOffset + i]);
             }
 
-            Buffer.BlockCopy(IV, _blockSize, IV, 0, IV.Length - _blockSize);
-            Buffer.BlockCopy(outputBuffer, outputOffset, IV, IV.Length - _blockSize, _blockSize);
+            Buffer.BlockCopy(outputBuffer, outputOffset, IV, 0, inputCount);
 
-            return _blockSize;
+            return inputCount;
         }
 
         /// <summary>
@@ -74,32 +73,31 @@ namespace Renci.SshNet.Security.Cryptography.Ciphers.Modes
         /// </returns>
         public override int DecryptBlock(byte[] inputBuffer, int inputOffset, int inputCount, byte[] outputBuffer, int outputOffset)
         {
-            if (inputBuffer.Length - inputOffset < _blockSize)
+            if (inputOffset + inputCount > inputBuffer.Length)
             {
                 throw new ArgumentException("Invalid input buffer");
             }
 
-            if (outputBuffer.Length - outputOffset < _blockSize)
+            if (outputOffset + inputCount > outputBuffer.Length)
             {
                 throw new ArgumentException("Invalid output buffer");
             }
 
-            if (inputCount != _blockSize)
+            if (inputCount <= 0 || inputCount > _blockSize)
             {
-                throw new ArgumentException(string.Format(CultureInfo.CurrentCulture, "inputCount must be {0}.", _blockSize));
+                throw new ArgumentException(string.Format(CultureInfo.CurrentCulture, "inputCount must be between 1 and {0}.", _blockSize));
             }
 
             _ = Cipher.EncryptBlock(IV, 0, IV.Length, _ivOutput, 0);
 
-            Buffer.BlockCopy(IV, _blockSize, IV, 0, IV.Length - _blockSize);
-            Buffer.BlockCopy(inputBuffer, inputOffset, IV, IV.Length - _blockSize, _blockSize);
-
-            for (var i = 0; i < _blockSize; i++)
+            for (var i = 0; i < inputCount; i++)
             {
                 outputBuffer[outputOffset + i] = (byte)(_ivOutput[i] ^ inputBuffer[inputOffset + i]);
             }
 
-            return _blockSize;
+            Buffer.BlockCopy(inputBuffer, inputOffset, IV, 0, inputCount);
+
+            return inputCount;
         }
     }
 }
